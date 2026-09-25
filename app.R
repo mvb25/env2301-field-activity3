@@ -339,7 +339,7 @@ server <- function(input, output, session) {
         ),
         radioButtons(
           "person_id", "Person",
-          choices = paste0("P", 1:8), selected = "P1", inline = TRUE
+          choices = paste0("P", 1:5), selected = "P1", inline = TRUE
         ),
         numericInput("canopy_pct", "Canopy cover (%)", value = NA, min = 0, max = 100, step = 0.1)
       )
