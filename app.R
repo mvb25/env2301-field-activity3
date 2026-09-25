@@ -12,7 +12,7 @@ library(jsonlite)
 # Optional:
 #   INSTRUCTOR_PIN = PIN required to open ?view=instructor
 #
-# Group-specific student links use ?group=G1 ... ?group=G6.
+# Group-specific student links use ?group=G1 ... ?group=G9.
 
 DATA_API_URL <- Sys.getenv("DATA_API_URL", "")
 DATA_API_TOKEN <- Sys.getenv("DATA_API_TOKEN", "")
@@ -172,7 +172,7 @@ server <- function(input, output, session) {
     }
     if (!is.null(q$group)) {
       g <- toupper(q$group)
-      if (g %in% paste0("G", 1:6)) group_id(g)
+      if (g %in% paste0("G", 1:9)) group_id(g)
     }
   }, once = TRUE, ignoreInit = FALSE)
 
@@ -286,7 +286,7 @@ server <- function(input, output, session) {
       class = "app-shell compact-shell",
       h2("ENV2301 Field Activity 3"),
       p(class = "subtitle", "Select your group once for this session."),
-      selectInput("group_select", "Group", choices = paste0("G", 1:6), selected = "G1"),
+      selectInput("group_select", "Group", choices = paste0("G", 1:9), selected = "G1"),
       actionButton("set_group", "Start", class = "btn-primary big-button"),
       if (!backend_is_remote()) div(class = "warning-box", "LOCAL TEST MODE — data are not using the shared Google Sheet backend.")
     )
@@ -559,7 +559,7 @@ server <- function(input, output, session) {
     if (!nzchar(host)) return(NULL)
     port_text <- if (nzchar(port) && !port %in% c("80", "443")) paste0(":", port) else ""
     base <- paste0(proto, "//", host, port_text, path)
-    tags <- lapply(paste0("G", 1:6), function(g) {
+    tags <- lapply(paste0("G", 1:9), function(g) {
       url <- paste0(base, "?group=", g)
       tags$div(class = "group-link-row", tags$strong(g), tags$a(href = url, target = "_blank", url))
     })
