@@ -1,0 +1,1 @@
+timestamp_server,timestamp_app,session_id,group_id,patch,method,point_id,point_number,is_repeat,is_reference,person_id,instrument_id,temperature_c,rh_pct,wind_ms,canopy_pct

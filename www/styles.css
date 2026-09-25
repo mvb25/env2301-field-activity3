@@ -1,0 +1,159 @@
+html, body {
+  background: #f6f7f8;
+  font-size: 16px;
+}
+
+body {
+  margin: 0;
+}
+
+.app-shell {
+  max-width: 620px;
+  margin: 0 auto;
+  padding: 14px 12px 36px 12px;
+}
+
+.compact-shell {
+  max-width: 440px;
+  padding-top: 34px;
+}
+
+.instructor-shell {
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 16px 18px 40px 18px;
+}
+
+.topbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.topbar h2 {
+  margin: 0;
+}
+
+.subtitle {
+  margin-top: 0;
+  color: #555;
+}
+
+.small-muted {
+  font-size: 0.88rem;
+  color: #666;
+}
+
+.small-link {
+  font-size: 0.82rem;
+  white-space: nowrap;
+}
+
+.control-card {
+  background: white;
+  border: 1px solid #d9dde1;
+  border-radius: 10px;
+  padding: 14px 14px 8px 14px;
+  margin-bottom: 12px;
+}
+
+.measurement-card {
+  padding-bottom: 16px;
+}
+
+.point-display {
+  font-size: 1.15rem;
+  padding: 8px 10px;
+  margin: 4px 0 14px 0;
+  background: #f1f3f5;
+  border-radius: 7px;
+}
+
+.form-group {
+  margin-bottom: 14px;
+}
+
+.radio-inline {
+  margin-right: 14px;
+  margin-bottom: 8px;
+}
+
+input.form-control,
+select.form-control {
+  min-height: 46px;
+  font-size: 1.05rem;
+}
+
+.btn {
+  min-height: 42px;
+}
+
+.big-button,
+.submit-button {
+  width: 100%;
+  min-height: 52px;
+  font-size: 1.05rem;
+  font-weight: 600;
+}
+
+.submit-button {
+  margin-top: 8px;
+}
+
+.three-grid {
+  /* Stack Kestrel fields at all screen widths. This is more reliable on phones
+     and avoids Bootstrap numeric inputs overflowing a narrow card on desktop. */
+  display: block;
+}
+
+.three-grid .form-group {
+  width: 100%;
+}
+
+.warning-box {
+  background: #fff4d6;
+  border: 1px solid #e3c768;
+  border-radius: 8px;
+  padding: 9px 11px;
+  margin-bottom: 12px;
+  font-size: 0.9rem;
+}
+
+.status-line {
+  min-height: 24px;
+  padding: 0 4px;
+  font-size: 0.93rem;
+}
+
+.status-ok {
+  font-weight: 600;
+}
+
+.status-error {
+  font-weight: 700;
+}
+
+.group-link-row {
+  margin: 6px 0;
+  word-break: break-all;
+}
+
+.group-link-row strong {
+  display: inline-block;
+  width: 34px;
+}
+
+@media (max-width: 560px) {
+  .app-shell {
+    padding-left: 9px;
+    padding-right: 9px;
+  }
+
+
+  .control-card {
+    padding-left: 12px;
+    padding-right: 12px;
+  }
+}
