@@ -37,14 +37,74 @@ empty_data <- function() {
   out
 }
 
+
+normalise_timestamp_column <- function(z) {
+  n <- length(z)
+  out <- rep(NA_character_, n)
+
+  # Preserve real R date-time objects.
+  if (inherits(z, "POSIXt")) {
+    return(format(as.POSIXct(z), "%Y-%m-%dT%H:%M:%OS3Z", tz = "UTC"))
+  }
+
+  if (inherits(z, "Date")) {
+    return(format(as.POSIXct(z, tz = "UTC"), "%Y-%m-%dT%H:%M:%OS3Z", tz = "UTC"))
+  }
+
+  raw <- trimws(as.character(z))
+  raw[raw %in% c("", "NA", "NULL", "null")] <- NA_character_
+
+  excel_origin <- as.POSIXct("1899-12-30 00:00:00", tz = "UTC")
+
+  for (i in seq_len(n)) {
+    s <- raw[i]
+    if (is.na(s) || !nzchar(s)) next
+
+    # Excel / Google Sheets serial date-time, e.g. 46290.04267.
+    num <- suppressWarnings(as.numeric(s))
+    if (length(num) == 1 && is.finite(num) && num > 20000 && num < 80000) {
+      tt <- excel_origin + num * 86400
+      out[i] <- format(tt, "%Y-%m-%dT%H:%M:%OS3Z", tz = "UTC")
+      next
+    }
+
+    # Epoch milliseconds or seconds, included defensively.
+    if (length(num) == 1 && is.finite(num) && num > 1e12) {
+      tt <- as.POSIXct(num / 1000, origin = "1970-01-01", tz = "UTC")
+      out[i] <- format(tt, "%Y-%m-%dT%H:%M:%OS3Z", tz = "UTC")
+      next
+    }
+    if (length(num) == 1 && is.finite(num) && num > 1e9) {
+      tt <- as.POSIXct(num, origin = "1970-01-01", tz = "UTC")
+      out[i] <- format(tt, "%Y-%m-%dT%H:%M:%OS3Z", tz = "UTC")
+      next
+    }
+
+    # Otherwise retain the timestamp text as supplied by the live app/backend.
+    out[i] <- s
+  }
+
+  out
+}
+
 normalise_data <- function(x) {
   if (is.null(x) || length(x) == 0) return(empty_data())
   x <- as.data.frame(x, stringsAsFactors = FALSE)
+
   for (nm in DATA_COLUMNS) {
     if (!nm %in% names(x)) x[[nm]] <- NA
   }
+
   x <- x[, DATA_COLUMNS, drop = FALSE]
-  for (nm in NUMERIC_COLUMNS) x[[nm]] <- suppressWarnings(as.numeric(x[[nm]]))
+
+  # Normalize timestamps before the rest of the dashboard sees them.
+  x$timestamp_server <- normalise_timestamp_column(x$timestamp_server)
+  x$timestamp_app <- normalise_timestamp_column(x$timestamp_app)
+
+  for (nm in NUMERIC_COLUMNS) {
+    x[[nm]] <- suppressWarnings(as.numeric(x[[nm]]))
+  }
+
   for (nm in LOGICAL_COLUMNS) {
     z <- x[[nm]]
     if (is.logical(z)) {
@@ -53,8 +113,10 @@ normalise_data <- function(x) {
       x[[nm]] <- tolower(as.character(z)) %in% c("true", "t", "1", "yes")
     }
   }
+
   x
 }
+
 
 backend_is_remote <- function() nzchar(DATA_API_URL)
 
@@ -470,6 +532,9 @@ server <- function(input, output, session) {
     }
   })
 
+
+
+
   instructor_ui <- reactive({
     div(
       class = "instructor-shell",
@@ -481,13 +546,19 @@ server <- function(input, output, session) {
           "Overview",
           br(),
           actionButton("refresh_data", "Refresh data", class = "btn-primary"),
-          downloadButton("download_data", "Download CSV"),
+          downloadButton("download_data", "Download full CSV"),
           br(), br(),
           textOutput("analysis_message"),
+          p(class = "small-muted", "The dashboard reads the Google Sheet tab named 'data'. If demo data were imported into a new tab, copy the rows into 'data' below the existing header."),
+          h4("Field progress"),
+          p("Counts are shown separately for ordinary points, shared reference readings and repeats."),
+          tableOutput("progress_table"),
+          h4("Loaded-data check"),
+          tableOutput("data_check_table"),
           uiOutput("group_links")
         ),
         tabPanel(
-          "Patch comparison",
+          "Patch & group estimates",
           br(),
           selectInput(
             "analysis_var", "Variable",
@@ -499,27 +570,84 @@ server <- function(input, output, session) {
             ),
             selected = "canopy_pct"
           ),
+          p("Patch estimates use ordinary, non-repeat points only. Deliberately selected reference points are excluded."),
+          h4("Ordinary observations by patch"),
           plotOutput("patch_plot", height = "420px"),
-          h4("Group summaries"),
+          tableOutput("patch_summary"),
+          h4("Nine independent group attempts to estimate the two patches"),
+          plotOutput("group_estimate_plot", height = "440px"),
           tableOutput("group_summary")
         ),
         tabPanel(
-          "Reference point",
+          "Same-location variation",
           br(),
-          p("Densiometer readings recorded at the five shared reference points in each patch."),
-          tableOutput("reference_table")
+          h4("Densitometer shared reference points"),
+          p("R1–R5 were deliberately selected to span canopy conditions. They are used here to compare readings taken at the same locations, not to estimate patch means."),
+          plotOutput("reference_plot", height = "420px"),
+          tableOutput("reference_summary"),
+          hr(),
+          h4("Kestrel repeated points"),
+          selectInput(
+            "repeat_var", "Kestrel variable",
+            choices = c(
+              "Temperature (°C)" = "temperature_c",
+              "Relative humidity (%)" = "rh_pct",
+              "Wind speed (m/s)" = "wind_ms"
+            ),
+            selected = "temperature_c"
+          ),
+          p("Repeated readings at the same point show short-term/instrument variation. The comparison with spread among ordinary points is descriptive, not a formal variance decomposition."),
+          tableOutput("kestrel_repeat_table"),
+          tableOutput("variation_scale_table")
+        ),
+        tabPanel(
+          "Kestrel through time",
+          br(),
+          selectInput(
+            "time_var", "Kestrel variable",
+            choices = c(
+              "Temperature (°C)" = "temperature_c",
+              "Relative humidity (%)" = "rh_pct",
+              "Wind speed (m/s)" = "wind_ms"
+            ),
+            selected = "temperature_c"
+          ),
+          p("The field session takes place over time, so apparent patch differences can be partly confounded with when each patch was sampled."),
+          plotOutput("time_plot", height = "430px"),
+          h4("Sampling windows by group and patch"),
+          tableOutput("time_order_table")
         ),
         tabPanel(
           "Sample size",
           br(),
-          p("Repeatedly draw samples from the pooled class observations and examine how sample means vary."),
-          uiOutput("resample_controls"),
+          selectInput(
+            "resample_var", "Variable",
+            choices = c(
+              "Canopy cover (%)" = "canopy_pct",
+              "Temperature (°C)" = "temperature_c",
+              "Relative humidity (%)" = "rh_pct",
+              "Wind speed (m/s)" = "wind_ms"
+            ),
+            selected = "canopy_pct"
+          ),
+          selectInput("resample_patch", "Patch", choices = c("A", "B"), selected = "A"),
+          selectInput("resample_group", "Data source", choices = c("All groups", paste0("G", 1:9)), selected = "All groups"),
+          uiOutput("resample_n_control"),
+          p("Bootstrap samples are drawn with replacement from ordinary observations. This shows sampling variability conditional on the observations that were actually collected; it cannot recover conditions the sampling design missed."),
           plotOutput("resample_plot", height = "360px"),
-          tableOutput("resample_summary")
+          plotOutput("resample_curve_plot", height = "360px"),
+          tableOutput("resample_summary"),
+          p(class = "small-muted", "SE = SD / sqrt(n) is shown as a teaching approximation. It assumes that the observations counted in n behave as independent sampling units. Spatial clustering or repeated sampling can make the effective amount of independent information smaller.")
         ),
         tabPanel(
           "Raw data",
           br(),
+          fluidRow(
+            column(3, selectInput("raw_group", "Group", choices = c("All", paste0("G", 1:9)), selected = "All")),
+            column(3, selectInput("raw_patch", "Patch", choices = c("All", "A", "B"), selected = "All")),
+            column(3, selectInput("raw_method", "Method", choices = c("All", "Densitometer", "Kestrel"), selected = "All")),
+            column(3, selectInput("raw_type", "Record type", choices = c("All", "Ordinary", "Repeat", "Reference"), selected = "All"))
+          ),
           tableOutput("raw_table")
         )
       )
@@ -566,106 +694,652 @@ server <- function(input, output, session) {
     tagList(h4("Student group links"), tags)
   })
 
+  empty_variable_data <- function() {
+    data.frame(
+      timestamp_app = character(0),
+      group_id = character(0),
+      patch = character(0),
+      method = character(0),
+      point_id = character(0),
+      is_repeat = logical(0),
+      is_reference = logical(0),
+      person_id = character(0),
+      instrument_id = character(0),
+      value = numeric(0),
+      stringsAsFactors = FALSE
+    )
+  }
+
+  variable_data <- function(var, ordinary_only = TRUE, group = NULL, patch = NULL) {
+    dat <- analysis_store()
+    if (nrow(dat) == 0 || is.null(var) || !nzchar(var) || !var %in% names(dat)) {
+      return(empty_variable_data())
+    }
+
+    target_method <- if (identical(var, "canopy_pct")) "Densitometer" else "Kestrel"
+
+    # Work with an explicit numeric vector rather than relying on the source
+    # column retaining its class after JSON/Google Sheets import.
+    vals <- suppressWarnings(as.numeric(unlist(dat[[var]], use.names = FALSE)))
+    if (length(vals) != nrow(dat)) return(empty_variable_data())
+
+    keep <- dat$method == target_method & is.finite(vals)
+    keep[is.na(keep)] <- FALSE
+
+    if (ordinary_only) {
+      ordinary <- !dat$is_reference & !dat$is_repeat
+      ordinary[is.na(ordinary)] <- FALSE
+      keep <- keep & ordinary
+    }
+    if (!is.null(group) && !identical(group, "All groups") && !identical(group, "All")) {
+      gkeep <- dat$group_id == group
+      gkeep[is.na(gkeep)] <- FALSE
+      keep <- keep & gkeep
+    }
+    if (!is.null(patch) && !identical(patch, "All")) {
+      pkeep <- dat$patch == patch
+      pkeep[is.na(pkeep)] <- FALSE
+      keep <- keep & pkeep
+    }
+
+    if (!any(keep)) return(empty_variable_data())
+
+    out <- dat[keep, c(
+      "timestamp_app", "group_id", "patch", "method", "point_id",
+      "is_repeat", "is_reference", "person_id", "instrument_id"
+    ), drop = FALSE]
+    out$value <- vals[keep]
+    out
+  }
+
+  safe_sd <- function(x) {
+    x <- x[is.finite(x)]
+    if (length(x) < 2) return(NA_real_)
+    sd(x)
+  }
+
+  summarise_values <- function(x) {
+    x <- x[is.finite(x)]
+    n <- length(x)
+    s <- safe_sd(x)
+    data.frame(
+      n = n,
+      mean = if (n) mean(x) else NA_real_,
+      sd = s,
+      se = if (n >= 2) s / sqrt(n) else NA_real_
+    )
+  }
+
+  empty_plot <- function(message) {
+    plot.new()
+    text(0.5, 0.5, message, cex = 1.0)
+    invisible(NULL)
+  }
+
+  output$progress_table <- renderTable({
+    dat <- analysis_store()
+    groups <- paste0("G", 1:9)
+    rows <- lapply(groups, function(g) {
+      z <- dat[dat$group_id == g, , drop = FALSE]
+      ordinary <- !z$is_reference & !z$is_repeat
+      data.frame(
+        Group = g,
+        Densi_A = sum(z$method == "Densitometer" & z$patch == "A" & ordinary, na.rm = TRUE),
+        Densi_B = sum(z$method == "Densitometer" & z$patch == "B" & ordinary, na.rm = TRUE),
+        Ref_A = sum(z$method == "Densitometer" & z$patch == "A" & z$is_reference, na.rm = TRUE),
+        Ref_B = sum(z$method == "Densitometer" & z$patch == "B" & z$is_reference, na.rm = TRUE),
+        Kestrel_A = sum(z$method == "Kestrel" & z$patch == "A" & ordinary, na.rm = TRUE),
+        Kestrel_B = sum(z$method == "Kestrel" & z$patch == "B" & ordinary, na.rm = TRUE),
+        Repeats = sum(z$is_repeat, na.rm = TRUE)
+      )
+    })
+    do.call(rbind, rows)
+  }, striped = TRUE, spacing = "s")
+
+  output$data_check_table <- renderTable({
+    dat <- analysis_store()
+    if (nrow(dat) == 0) return(NULL)
+    ordinary <- !dat$is_reference & !dat$is_repeat
+    ordinary[is.na(ordinary)] <- FALSE
+    data.frame(
+      Category = c(
+        "All rows",
+        "Densitometer ordinary",
+        "Densitometer repeats",
+        "Densitometer references",
+        "Kestrel ordinary",
+        "Kestrel repeats"
+      ),
+      n = c(
+        nrow(dat),
+        sum(dat$method == "Densitometer" & ordinary, na.rm = TRUE),
+        sum(dat$method == "Densitometer" & dat$is_repeat & !dat$is_reference, na.rm = TRUE),
+        sum(dat$method == "Densitometer" & dat$is_reference, na.rm = TRUE),
+        sum(dat$method == "Kestrel" & ordinary, na.rm = TRUE),
+        sum(dat$method == "Kestrel" & dat$is_repeat, na.rm = TRUE)
+      )
+    )
+  }, striped = TRUE, spacing = "s")
+
   selected_variable_data <- reactive({
     req(input$analysis_var)
-    dat <- analysis_store()
-    if (nrow(dat) == 0) return(data.frame())
-    var <- input$analysis_var
-    keep <- !is.na(dat[[var]])
-    if (var == "canopy_pct") keep <- keep & dat$method == "Densitometer" else keep <- keep & dat$method == "Kestrel"
-    out <- dat[keep, c("timestamp_app", "group_id", "patch", "method", "point_id", "person_id", "instrument_id", var), drop = FALSE]
-    names(out)[ncol(out)] <- "value"
-    out$value <- as.numeric(out$value)
-    out
+    variable_data(input$analysis_var, ordinary_only = TRUE)
   })
 
   output$patch_plot <- renderPlot({
     d <- selected_variable_data()
-    validate(need(nrow(d) > 0, "No observations for this variable yet."))
-    boxplot(
-      value ~ patch, data = d,
-      xlab = "Patch",
-      ylab = unname(VARIABLE_LABELS[input$analysis_var])
+    if (nrow(d) == 0 || !"value" %in% names(d) || !any(is.finite(d$value))) {
+      empty_plot("No ordinary observations for this variable yet.")
+      return(invisible(NULL))
+    }
+
+    keep <- is.finite(d$value) & d$patch %in% c("A", "B")
+    keep[is.na(keep)] <- FALSE
+    d <- d[keep, , drop = FALSE]
+    if (nrow(d) == 0) {
+      empty_plot("No ordinary observations for this variable yet.")
+      return(invisible(NULL))
+    }
+
+    vals <- list(
+      A = d$value[d$patch == "A"],
+      B = d$value[d$patch == "B"]
     )
-    stripchart(value ~ patch, data = d, vertical = TRUE, method = "jitter", add = TRUE, pch = 16, cex = 0.8)
+    present <- lengths(vals) > 0
+    vals_present <- vals[present]
+    if (length(vals_present) == 0) {
+      empty_plot("No ordinary observations for this variable yet.")
+      return(invisible(NULL))
+    }
+
+    cols <- grDevices::hcl.colors(9, "Dark 3")
+    group_index <- match(d$group_id, paste0("G", 1:9))
+    group_index[is.na(group_index)] <- 1L
+    point_cols <- cols[group_index]
+
+    boxplot(
+      vals_present,
+      xlab = "Patch",
+      ylab = unname(VARIABLE_LABELS[input$analysis_var]),
+      outline = FALSE
+    )
+
+    patch_positions <- setNames(seq_along(vals_present), names(vals_present))
+    x <- unname(patch_positions[d$patch])
+    set.seed(2301)
+    points(jitter(x, amount = 0.08), d$value, pch = 16, cex = 0.85, col = point_cols)
+    legend("topright", legend = paste0("G", 1:9), col = cols, pch = 16, cex = 0.72, ncol = 3, bty = "n")
+  })
+
+  output$patch_summary <- renderTable({
+    d <- selected_variable_data()
+    if (nrow(d) == 0) return(NULL)
+    rows <- lapply(c("A", "B"), function(p) {
+      z <- d$value[d$patch == p]
+      s <- summarise_values(z)
+      data.frame(
+        Patch = p,
+        n = s$n,
+        Mean = round(s$mean, 3),
+        SD = round(s$sd, 3),
+        SE = round(s$se, 3)
+      )
+    })
+    do.call(rbind, rows)
+  }, striped = TRUE, spacing = "s", na = "")
+
+  group_patch_summary <- reactive({
+    d <- selected_variable_data()
+    groups <- paste0("G", 1:9)
+    rows <- lapply(groups, function(g) {
+      row <- data.frame(Group = g)
+      for (p in c("A", "B")) {
+        x <- d$value[d$group_id == g & d$patch == p]
+        s <- summarise_values(x)
+        row[[paste0("n_", p)]] <- s$n
+        row[[paste0("mean_", p)]] <- s$mean
+        row[[paste0("sd_", p)]] <- s$sd
+        row[[paste0("se_", p)]] <- s$se
+      }
+      row$A_minus_B <- row$mean_A - row$mean_B
+      row
+    })
+    do.call(rbind, rows)
+  })
+
+  output$group_estimate_plot <- renderPlot({
+    s <- group_patch_summary()
+    if (is.null(s) || nrow(s) == 0) {
+      empty_plot("No group means available yet.")
+      return(invisible(NULL))
+    }
+
+    y <- suppressWarnings(as.numeric(c(s$mean_A, s$mean_B)))
+    y <- y[is.finite(y)]
+    if (length(y) == 0) {
+      empty_plot("No group means available yet.")
+      return(invisible(NULL))
+    }
+
+    yr <- range(y, finite = TRUE)
+    pad <- if (!all(is.finite(yr)) || diff(yr) == 0) 1 else 0.08 * diff(yr)
+    yr <- yr + c(-pad, pad)
+
+    cols <- grDevices::hcl.colors(9, "Dark 3")
+    plot(
+      NA_real_, NA_real_,
+      xlim = c(0.8, 2.2), ylim = yr,
+      xaxt = "n",
+      xlab = "Patch", ylab = unname(VARIABLE_LABELS[input$analysis_var])
+    )
+    axis(1, at = c(1, 2), labels = c("A", "B"))
+
+    for (i in seq_len(nrow(s))) {
+      vals <- suppressWarnings(as.numeric(c(s$mean_A[i], s$mean_B[i])))
+      good <- is.finite(vals)
+      if (any(good)) {
+        points(c(1, 2)[good], vals[good], pch = 16, col = cols[i], cex = 1.1)
+      }
+      if (all(good)) lines(c(1, 2), vals, col = cols[i], lwd = 1.5)
+    }
+    legend("topright", legend = s$Group, col = cols, pch = 16, lty = 1, cex = 0.75, ncol = 3, bty = "n")
   })
 
   output$group_summary <- renderTable({
-    d <- selected_variable_data()
-    if (nrow(d) == 0) return(NULL)
-    mean_df <- aggregate(value ~ group_id + patch, d, mean, na.rm = TRUE)
-    sd_df <- aggregate(value ~ group_id + patch, d, sd, na.rm = TRUE)
-    n_df <- aggregate(value ~ group_id + patch, d, length)
-    names(mean_df)[3] <- "mean"
-    names(sd_df)[3] <- "sd"
-    names(n_df)[3] <- "n"
-    out <- Reduce(function(x, y) merge(x, y, by = c("group_id", "patch"), all = TRUE), list(mean_df, sd_df, n_df))
-    out$mean <- round(out$mean, 2)
-    out$sd <- round(out$sd, 2)
-    out[order(out$patch, out$group_id), ]
+    s <- group_patch_summary()
+    if (is.null(s) || nrow(s) == 0) return(NULL)
+    out <- data.frame(
+      Group = s$Group,
+      n_A = s$n_A,
+      Mean_A = round(s$mean_A, 3),
+      SD_A = round(s$sd_A, 3),
+      SE_A = round(s$se_A, 3),
+      n_B = s$n_B,
+      Mean_B = round(s$mean_B, 3),
+      SD_B = round(s$sd_B, 3),
+      SE_B = round(s$se_B, 3),
+      A_minus_B = round(s$A_minus_B, 3)
+    )
+    out
   }, striped = TRUE, spacing = "s", na = "")
 
-  output$reference_table <- renderTable({
+  output$reference_plot <- renderPlot({
     dat <- analysis_store()
-    if (nrow(dat) == 0) return(NULL)
-    d <- dat[dat$method == "Densitometer" & dat$is_reference & !is.na(dat$canopy_pct),
-             c("timestamp_app", "group_id", "patch", "point_id", "person_id", "canopy_pct"), drop = FALSE]
+    canopy <- suppressWarnings(as.numeric(unlist(dat$canopy_pct, use.names = FALSE)))
+    keep <- dat$method == "Densitometer" & dat$is_reference & is.finite(canopy)
+    keep[is.na(keep)] <- FALSE
+    if (!any(keep)) {
+      empty_plot("No shared-reference readings yet.")
+      return(invisible(NULL))
+    }
+    d <- dat[keep, c("group_id", "patch", "point_id", "person_id"), drop = FALSE]
+    d$canopy_pct <- canopy[keep]
+    lev <- c(paste0("R-A", 1:5), paste0("R-B", 1:5))
+    d$point <- factor(d$point_id, levels = lev)
+    d <- d[!is.na(d$point) & is.finite(d$canopy_pct), , drop = FALSE]
+    if (nrow(d) == 0) {
+      empty_plot("No valid shared-reference readings yet.")
+      return(invisible(NULL))
+    }
+    cols <- grDevices::hcl.colors(9, "Dark 3")
+    group_index <- match(d$group_id, paste0("G", 1:9))
+    group_index[is.na(group_index)] <- 1L
+    x <- as.numeric(d$point)
+    set.seed(2301)
+    plot(jitter(x, amount = 0.10), d$canopy_pct,
+         pch = 16, col = cols[group_index],
+         xaxt = "n", xlab = "Shared reference point",
+         ylab = "Canopy cover (%)", xlim = c(0.5, 10.5))
+    axis(1, at = 1:10, labels = c(paste0("A", 1:5), paste0("B", 1:5)))
+    means <- tapply(d$canopy_pct, d$point, mean, na.rm = TRUE)
+    mean_pos <- which(is.finite(means))
+    if (length(mean_pos)) points(mean_pos, means[mean_pos], pch = 18, cex = 1.6)
+    legend("topright", legend = c(paste0("G", 1:9), "Point mean"),
+           col = c(cols, "black"), pch = c(rep(16, 9), 18),
+           cex = 0.7, ncol = 2, bty = "n")
+  })
+
+  output$reference_summary <- renderTable({
+    dat <- analysis_store()
+    canopy <- suppressWarnings(as.numeric(unlist(dat$canopy_pct, use.names = FALSE)))
+    keep <- dat$method == "Densitometer" & dat$is_reference & is.finite(canopy)
+    keep[is.na(keep)] <- FALSE
+    if (!any(keep)) return(NULL)
+    d <- dat[keep, c("group_id", "patch", "point_id", "person_id"), drop = FALSE]
+    d$canopy_pct <- canopy[keep]
+    lev <- c(paste0("R-A", 1:5), paste0("R-B", 1:5))
+    rows <- lapply(lev, function(id) {
+      z <- d[d$point_id == id, , drop = FALSE]
+      if (nrow(z) == 0) return(NULL)
+      data.frame(
+        Point = id,
+        n = nrow(z),
+        Groups = length(unique(z$group_id[nzchar(z$group_id)])),
+        People = length(unique(paste(z$group_id, z$person_id, sep = "-"))),
+        Mean = mean(z$canopy_pct, na.rm = TRUE),
+        SD = safe_sd(z$canopy_pct),
+        Min = min(z$canopy_pct, na.rm = TRUE),
+        Max = max(z$canopy_pct, na.rm = TRUE)
+      )
+    })
+    out <- do.call(rbind, rows)
+    if (is.null(out)) return(NULL)
+    for (nm in c("Mean", "SD", "Min", "Max")) out[[nm]] <- round(out[[nm]], 2)
+    out
+  }, striped = TRUE, spacing = "s", na = "")
+
+  kestrel_repeat_data <- reactive({
+    req(input$repeat_var)
+    dat <- analysis_store()
+    var <- input$repeat_var
+    d <- dat[
+      dat$method == "Kestrel" & !dat$is_reference &
+        !is.na(dat[[var]]) & is.finite(dat[[var]]),
+      c("group_id", "patch", "point_id", "is_repeat", "instrument_id", var),
+      drop = FALSE
+    ]
+    if (nrow(d) == 0) return(data.frame())
+    names(d)[ncol(d)] <- "value"
+    key <- paste(d$group_id, d$patch, d$point_id, sep = "|")
+    repeated_keys <- unique(key[d$is_repeat | duplicated(key) | duplicated(key, fromLast = TRUE)])
+    d$key <- key
+    d[d$key %in% repeated_keys, , drop = FALSE]
+  })
+
+  output$kestrel_repeat_table <- renderTable({
+    d <- kestrel_repeat_data()
+    if (nrow(d) == 0) return(data.frame(Message = "No Kestrel repeated points for this variable yet."))
+    rows <- lapply(split(d, d$key), function(z) {
+      data.frame(
+        Group = z$group_id[1],
+        Patch = z$patch[1],
+        Point = z$point_id[1],
+        n = nrow(z),
+        Instruments = paste(sort(unique(z$instrument_id[nzchar(z$instrument_id)])), collapse = ", "),
+        Mean = mean(z$value),
+        SD = safe_sd(z$value),
+        Range = diff(range(z$value))
+      )
+    })
+    out <- do.call(rbind, rows)
+    for (nm in c("Mean", "SD", "Range")) out[[nm]] <- round(out[[nm]], 3)
+    rownames(out) <- NULL
+    out
+  }, striped = TRUE, spacing = "s", na = "")
+
+  pooled_within_sd <- function(d) {
+    if (nrow(d) == 0) return(NA_real_)
+    spl <- split(d$value, d$key)
+    spl <- spl[vapply(spl, length, integer(1)) >= 2]
+    if (!length(spl)) return(NA_real_)
+    dfs <- vapply(spl, safe_sd, numeric(1))
+    ns <- vapply(spl, length, integer(1))
+    good <- is.finite(dfs) & ns >= 2
+    if (!any(good)) return(NA_real_)
+    sqrt(sum((ns[good] - 1) * dfs[good]^2) / sum(ns[good] - 1))
+  }
+
+  output$variation_scale_table <- renderTable({
+    req(input$repeat_var)
+    var <- input$repeat_var
+    ordinary <- variable_data(var, ordinary_only = TRUE)
+    repeats <- kestrel_repeat_data()
+    rows <- lapply(c("A", "B"), function(p) {
+      x <- ordinary$value[ordinary$patch == p]
+      r <- repeats[repeats$patch == p, , drop = FALSE]
+      data.frame(
+        Patch = p,
+        Ordinary_points_n = length(x),
+        SD_among_ordinary_points = safe_sd(x),
+        Repeated_points_n = length(unique(r$key)),
+        Pooled_SD_within_repeated_points = pooled_within_sd(r)
+      )
+    })
+    out <- do.call(rbind, rows)
+    out$SD_among_ordinary_points <- round(out$SD_among_ordinary_points, 3)
+    out$Pooled_SD_within_repeated_points <- round(out$Pooled_SD_within_repeated_points, 3)
+    out
+  }, striped = TRUE, spacing = "s", na = "")
+
+
+
+  parse_local_time <- function(x) {
+    x <- trimws(as.character(x))
+    x[x %in% c("", "NA", "NULL", "null")] <- NA_character_
+
+    # Store parsed times numerically so a single malformed timestamp cannot
+    # cause as.POSIXct() to fail for the entire vector.
+    out_num <- rep(NA_real_, length(x))
+
+    for (i in seq_along(x)) {
+      xi <- x[i]
+      if (is.na(xi) || !nzchar(xi)) next
+
+      # Google/JSON commonly supplies ISO-8601 timestamps such as:
+      # 2026-09-25T01:01:27.000Z
+      z <- suppressWarnings(strptime(
+        xi,
+        format = "%Y-%m-%dT%H:%M:%OSZ",
+        tz = "UTC"
+      ))
+
+      # ISO timestamp without a trailing Z.
+      if (is.na(z)) {
+        z <- suppressWarnings(strptime(
+          xi,
+          format = "%Y-%m-%dT%H:%M:%OS",
+          tz = "UTC"
+        ))
+      }
+
+      # Conventional date-time strings.
+      if (is.na(z)) {
+        z <- suppressWarnings(strptime(
+          xi,
+          format = "%Y-%m-%d %H:%M:%OS",
+          tz = "UTC"
+        ))
+      }
+
+      # ISO timestamps carrying a numeric UTC offset.
+      if (is.na(z)) {
+        xi_offset <- sub(
+          "([+-][0-9]{2}):([0-9]{2})$",
+          "\\1\\2",
+          xi
+        )
+        z <- suppressWarnings(strptime(
+          xi_offset,
+          format = "%Y-%m-%dT%H:%M:%OS%z",
+          tz = "UTC"
+        ))
+      }
+
+      if (!is.na(z)) {
+        out_num[i] <- as.numeric(as.POSIXct(z, tz = "UTC"))
+      }
+    }
+
+    tt <- as.POSIXct(out_num, origin = "1970-01-01", tz = "UTC")
+
+    # Change display timezone only; the underlying instant remains UTC-based.
+    attr(tt, "tzone") <- "Asia/Singapore"
+    tt
+  }
+
+
+  kestrel_time_data <- reactive({
+    req(input$time_var)
+    d <- variable_data(input$time_var, ordinary_only = FALSE)
+    if (nrow(d) == 0) return(empty_variable_data())
+    d$time_local <- parse_local_time(d$timestamp_app)
+    good <- !is.na(d$time_local) & is.finite(as.numeric(d$time_local)) & is.finite(d$value)
+    good[is.na(good)] <- FALSE
+    d[good, , drop = FALSE]
+  })
+
+  output$time_plot <- renderPlot({
+    d <- kestrel_time_data()
+    if (nrow(d) == 0) {
+      empty_plot("No Kestrel observations with valid timestamps yet.")
+      return(invisible(NULL))
+    }
+    xnum <- as.numeric(d$time_local)
+    good <- is.finite(xnum) & is.finite(d$value) & d$patch %in% c("A", "B")
+    good[is.na(good)] <- FALSE
+    d <- d[good, , drop = FALSE]
+    xnum <- xnum[good]
+    if (nrow(d) == 0 || !length(xnum)) {
+      empty_plot("No Kestrel observations with valid timestamps yet.")
+      return(invisible(NULL))
+    }
+    patch_cols <- grDevices::hcl.colors(2, "Dark 2")
+    idx <- match(d$patch, c("A", "B"))
+    plot(d$time_local, d$value,
+         pch = c(16, 17)[idx], col = patch_cols[idx],
+         xlab = "Local time (Singapore)",
+         ylab = unname(VARIABLE_LABELS[input$time_var]))
+    legend("topright", legend = c("Patch A", "Patch B"),
+           col = patch_cols, pch = c(16, 17), bty = "n")
+  })
+
+  output$time_order_table <- renderTable({
+    d <- kestrel_time_data()
     if (nrow(d) == 0) return(NULL)
-    d$canopy_pct <- round(d$canopy_pct, 1)
-    d[order(d$patch, d$group_id, d$timestamp_app), ]
+    keys <- interaction(d$group_id, d$patch, drop = TRUE)
+    rows <- lapply(split(d, keys), function(z) {
+      data.frame(
+        Group = z$group_id[1],
+        Patch = z$patch[1],
+        n = nrow(z),
+        First = format(min(z$time_local), "%H:%M:%S"),
+        Last = format(max(z$time_local), "%H:%M:%S")
+      )
+    })
+    out <- do.call(rbind, rows)
+    out <- out[order(out$First, out$Group, out$Patch), ]
+    rownames(out) <- NULL
+    out
   }, striped = TRUE, spacing = "s")
 
-  output$resample_controls <- renderUI({
-    d <- selected_variable_data()
-    if (nrow(d) == 0) return(p("No data available for the selected variable."))
-    patches <- sort(unique(d$patch))
-    patch <- patches[1]
-    nmax <- max(table(d$patch))
-    tagList(
-      selectInput("resample_patch", "Patch", choices = patches, selected = patch),
-      sliderInput("resample_n", "Sample size (n)", min = 2, max = max(2, nmax), value = min(5, max(2, nmax)), step = 1)
+  resample_source_data <- reactive({
+    req(input$resample_var, input$resample_patch, input$resample_group)
+    variable_data(
+      input$resample_var,
+      ordinary_only = TRUE,
+      group = input$resample_group,
+      patch = input$resample_patch
+    )
+  })
+
+  output$resample_n_control <- renderUI({
+    d <- resample_source_data()
+    nmax <- nrow(d)
+    if (nmax < 2) return(p("At least two ordinary observations are needed."))
+    sliderInput(
+      "resample_n", "Sample size (n)",
+      min = 2, max = nmax,
+      value = min(5, nmax), step = 1
     )
   })
 
   resample_results <- reactive({
-    req(input$resample_patch, input$resample_n)
-    d <- selected_variable_data()
-    x <- d$value[d$patch == input$resample_patch]
-    x <- x[is.finite(x)]
-    n <- as.integer(input$resample_n)
-    validate(need(length(x) >= 2, "Not enough observations yet."))
-    validate(need(n <= length(x), paste("Maximum n for this patch is", length(x))))
+    if (is.null(input$resample_n)) return(NULL)
+    d <- resample_source_data()
+    if (nrow(d) == 0 || !"value" %in% names(d)) return(NULL)
+    x <- d$value[is.finite(d$value)]
+    n <- suppressWarnings(as.integer(input$resample_n))
+    if (length(x) < 2 || length(n) != 1 || is.na(n) || n < 2 || n > length(x)) return(NULL)
     set.seed(2301 + n)
-    means <- replicate(500, mean(sample(x, size = n, replace = FALSE)))
+    means <- replicate(1000, mean(sample(x, size = n, replace = TRUE)))
     list(x = x, n = n, means = means)
   })
 
   output$resample_plot <- renderPlot({
     z <- resample_results()
-    hist(z$means, breaks = "FD", main = paste("500 sample means; n =", z$n), xlab = "Sample mean")
+    if (is.null(z)) {
+      empty_plot("Not enough ordinary observations for this selection yet.")
+      return(invisible(NULL))
+    }
+    hist(z$means, breaks = "FD",
+         main = paste("1,000 bootstrap sample means; n =", z$n),
+         xlab = "Sample mean")
     abline(v = mean(z$x), lwd = 2)
+  })
+
+  output$resample_curve_plot <- renderPlot({
+    d <- resample_source_data()
+    if (nrow(d) == 0 || !"value" %in% names(d)) {
+      empty_plot("Not enough ordinary observations for this selection yet.")
+      return(invisible(NULL))
+    }
+    x <- d$value[is.finite(d$value)]
+    if (length(x) < 2) {
+      empty_plot("Not enough ordinary observations for this selection yet.")
+      return(invisible(NULL))
+    }
+    ns <- 2:length(x)
+    set.seed(2301)
+    boot_sd <- vapply(ns, function(n) {
+      vals <- replicate(300, mean(sample(x, size = n, replace = TRUE)))
+      sd(vals)
+    }, numeric(1))
+    theoretical <- sd(x) / sqrt(ns)
+    yr <- range(c(boot_sd, theoretical), finite = TRUE)
+    if (length(yr) != 2 || any(!is.finite(yr))) {
+      empty_plot("Sampling-variability curve could not be calculated.")
+      return(invisible(NULL))
+    }
+    if (diff(yr) == 0) yr <- yr + c(-0.5, 0.5)
+    plot(ns, boot_sd, type = "b", pch = 16,
+         xlab = "Sample size (n)",
+         ylab = "SD of sample means", ylim = yr)
+    lines(ns, theoretical, lty = 2, lwd = 2)
+    legend("topright", legend = c("Bootstrap", "SD / sqrt(n)"),
+           lty = c(1, 2), pch = c(16, NA), bty = "n")
   })
 
   output$resample_summary <- renderTable({
     z <- resample_results()
+    if (is.null(z)) return(data.frame(Message = "Not enough ordinary observations for this selection yet."))
     data.frame(
-      quantity = c("Available observations", "Full-data mean", "Observed SD", "Sample size", "SD of 500 sample means", "SD / sqrt(n)"),
-      value = c(
-        length(z$x),
-        round(mean(z$x), 3),
-        round(sd(z$x), 3),
-        z$n,
-        round(sd(z$means), 3),
-        round(sd(z$x) / sqrt(z$n), 3)
+      Quantity = c(
+        "Available ordinary observations",
+        "Full-data mean",
+        "Observed SD",
+        "Selected sample size",
+        "SD of 1,000 bootstrap means",
+        "SD / sqrt(n)"
+      ),
+      Value = c(
+        length(z$x), round(mean(z$x), 3), round(sd(z$x), 3), z$n,
+        round(sd(z$means), 3), round(sd(z$x) / sqrt(z$n), 3)
       )
     )
   }, striped = TRUE, spacing = "s")
 
-  output$raw_table <- renderTable({
+  raw_filtered <- reactive({
     dat <- analysis_store()
+    if (nrow(dat) == 0) return(dat)
+    keep <- rep(TRUE, nrow(dat))
+    if (!is.null(input$raw_group) && input$raw_group != "All") keep <- keep & dat$group_id == input$raw_group
+    if (!is.null(input$raw_patch) && input$raw_patch != "All") keep <- keep & dat$patch == input$raw_patch
+    if (!is.null(input$raw_method) && input$raw_method != "All") keep <- keep & dat$method == input$raw_method
+    if (!is.null(input$raw_type) && input$raw_type != "All") {
+      if (input$raw_type == "Ordinary") keep <- keep & !dat$is_reference & !dat$is_repeat
+      if (input$raw_type == "Repeat") keep <- keep & dat$is_repeat
+      if (input$raw_type == "Reference") keep <- keep & dat$is_reference
+    }
+    dat[keep, , drop = FALSE]
+  })
+
+  output$raw_table <- renderTable({
+    dat <- raw_filtered()
     if (nrow(dat) == 0) return(NULL)
-    tail(dat, 100)
+    tail(dat, 200)
   }, striped = TRUE, spacing = "xs")
+
+
 }
 
 shinyApp(ui, server)
