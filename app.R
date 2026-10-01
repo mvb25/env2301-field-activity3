@@ -530,6 +530,184 @@ server <- function(input, output, session) {
               style = "max-width: 100%; height: auto; display: block; margin: 0 auto 20px auto; border: 1px solid #ddd;"
             )
           )
+        ),
+        tabPanel(
+          "Results",
+          br(),
+          actionButton(
+            "refresh_data",
+            "Refresh class results",
+            class = "btn-primary"
+          ),
+          br(), br(),
+          textOutput("analysis_message"),
+          p(
+            class = "small-muted",
+            "These are pooled class results. Refresh after more groups have submitted data."
+          ),
+          tabsetPanel(
+            id = "student_results_tabs",
+
+            tabPanel(
+              "Patch & groups",
+              br(),
+              selectInput(
+                "analysis_var",
+                "Variable",
+                choices = c(
+                  "Canopy cover (%)" = "canopy_pct",
+                  "Temperature (°C)" = "temperature_c",
+                  "Relative humidity (%)" = "rh_pct",
+                  "Wind speed (m/s)" = "wind_ms"
+                ),
+                selected = "canopy_pct"
+              ),
+              p(
+                "Each point is one spatial sampling location mean. For canopy cover, ",
+                "readings are first averaged within a person and then across people at ",
+                "that location. Filled points reached the planned within-location ",
+                "replication; open points did not."
+              ),
+              plotOutput("patch_plot", height = "500px"),
+              tableOutput("patch_summary"),
+              h4("Group estimates of the two patches"),
+              p(
+                "Each line connects one student group's mean estimate for Patch A and ",
+                "Patch B. Differences among groups can arise because groups sampled ",
+                "different locations as well as because measurements vary."
+              ),
+              plotOutput("group_estimate_plot", height = "430px")
+            ),
+
+            tabPanel(
+              "Same location",
+              br(),
+              h4("Ordinary canopy location"),
+              p(
+                "Choose a patch, group and location. Small points are individual ",
+                "densitometer readings, larger points are person means, and the dashed ",
+                "line is the overall location mean."
+              ),
+              fluidRow(
+                column(
+                  4,
+                  selectInput(
+                    "same_patch",
+                    "Patch",
+                    choices = c("A", "B"),
+                    selected = "A"
+                  )
+                ),
+                column(
+                  4,
+                  selectInput(
+                    "same_group",
+                    "Group",
+                    choices = paste0("G", 1:9),
+                    selected = "G1"
+                  )
+                ),
+                column(4, uiOutput("same_location_ui"))
+              ),
+              uiOutput("same_location_replication_notice"),
+              plotOutput("same_location_plot", height = "390px"),
+              tableOutput("same_location_table"),
+              hr(),
+              h4("Shared reference points"),
+              p(
+                "These deliberately selected points let us compare how different ",
+                "people and groups estimate canopy cover at the same places. They are ",
+                "not used to estimate the patch mean."
+              ),
+              plotOutput("reference_plot", height = "420px")
+            ),
+
+            tabPanel(
+              "Variation levels",
+              br(),
+              h4("Where is the observed variation in canopy measurements?"),
+              p(
+                "The stacked bar descriptively partitions the observed variation into ",
+                "differences between patches, among groups within patches, among ",
+                "locations within groups, among people at a location, and among ",
+                "repeated readings by the same person."
+              ),
+              plotOutput("variation_partition_plot", height = "330px"),
+              tableOutput("variation_partition_table"),
+              h4("Replication actually achieved"),
+              p(
+                "Lower replication does not remove a location from the analysis, but ",
+                "it provides less information about variation among people or repeated ",
+                "readings."
+              ),
+              tableOutput("replication_coverage_table"),
+              p(
+                class = "small-muted",
+                "This is a descriptive decomposition of this class dataset, not a ",
+                "formal estimate of population-level variance components."
+              )
+            ),
+
+            tabPanel(
+              "Kestrel through time",
+              br(),
+              selectInput(
+                "time_var",
+                "Kestrel variable",
+                choices = c(
+                  "Temperature (°C)" = "temperature_c",
+                  "Relative humidity (%)" = "rh_pct",
+                  "Wind speed (m/s)" = "wind_ms"
+                ),
+                selected = "temperature_c"
+              ),
+              p(
+                "All individual Kestrel readings are shown. Short lines connect ",
+                "repeated readings from the same sampling location. If patches were ",
+                "sampled at different times, apparent patch differences can partly ",
+                "reflect weather changing through the session."
+              ),
+              plotOutput("time_plot", height = "430px"),
+              tableOutput("time_order_table")
+            ),
+
+            tabPanel(
+              "Sample size",
+              br(),
+              selectInput(
+                "resample_var",
+                "Variable",
+                choices = c(
+                  "Canopy cover (%)" = "canopy_pct",
+                  "Temperature (°C)" = "temperature_c",
+                  "Relative humidity (%)" = "rh_pct",
+                  "Wind speed (m/s)" = "wind_ms"
+                ),
+                selected = "canopy_pct"
+              ),
+              selectInput(
+                "resample_patch",
+                "Patch",
+                choices = c("A", "B"),
+                selected = "A"
+              ),
+              selectInput(
+                "resample_group",
+                "Data source",
+                choices = c("All groups", paste0("G", 1:9)),
+                selected = "All groups"
+              ),
+              uiOutput("resample_n_control"),
+              p(
+                "The bootstrap repeatedly samples from the observed location means. ",
+                "As sample size increases, the distribution of possible sample means ",
+                "usually becomes narrower."
+              ),
+              plotOutput("resample_plot", height = "360px"),
+              plotOutput("resample_curve_plot", height = "360px"),
+              tableOutput("resample_summary")
+            )
+          )
         )
       )
     )
@@ -1073,6 +1251,13 @@ server <- function(input, output, session) {
   }
 
   observeEvent(input$refresh_data, load_analysis_data())
+
+  observeEvent(input$student_tabs, {
+    if (identical(input$student_tabs, "Results") &&
+        nrow(analysis_store()) == 0) {
+      load_analysis_data()
+    }
+  }, ignoreInit = TRUE)
 
   observeEvent(instructor_view(), {
     if (isTRUE(instructor_view()) && isTRUE(instructor_unlocked())) {
